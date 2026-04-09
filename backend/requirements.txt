@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+google-genai
+pymongo
+python-dotenv
+pandas
+certifi
+Pillow
