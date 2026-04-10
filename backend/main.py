@@ -156,9 +156,12 @@ async def analyze_document(file: UploadFile = File(...)):
         print(f"[Backend] Extracted {len(data.get('transactions', []))} transactions, confidence: {data.get('ocr_confidence')}")
 
         return JSONResponse(content={
-            "status": "success",
-            "ocr_confidence": data.get("ocr_confidence", 0.85),
-            "transactions": data.get("transactions", []),
+            "success": True,
+            "data": {
+                "ocr_confidence": data.get("ocr_confidence", 0.85),
+                "transactions": data.get("transactions", []),
+            },
+            "error": None
         })
 
     except json.JSONDecodeError as e:
@@ -166,13 +169,13 @@ async def analyze_document(file: UploadFile = File(...)):
         print(f"[Backend] Raw text was: {raw_text}")
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": "Failed to parse AI response. Please try again."},
+            content={"success": False, "data": None, "error": "Failed to parse AI response. Please try again."},
         )
     except Exception as e:
         traceback.print_exc()
         return JSONResponse(
             status_code=500,
-            content={"status": "error", "message": str(e)},
+            content={"success": False, "data": None, "error": str(e)},
         )
 
 
@@ -184,10 +187,10 @@ async def get_transactions():
     try:
         txns = list(transactions_collection.find({}, {"_id": 0}))
         print(f"[MongoDB] Returning {len(txns)} stored transactions")
-        return JSONResponse(content={"transactions": txns})
+        return JSONResponse(content={"success": True, "data": {"transactions": txns}, "error": None})
     except Exception as e:
         print(f"[MongoDB] Returning empty transactions due to error: {e}")
-        return JSONResponse(content={"transactions": []})
+        return JSONResponse(content={"success": False, "data": {"transactions": []}, "error": str(e)})
 
 
 # --------------- Recurring Detection ---------------
@@ -271,11 +274,11 @@ async def detect_recurring(request: DetectRecurringRequest):
             })
 
         print(f"[Backend] Detected {len(recurring)} recurring payments")
-        return JSONResponse(content={"recurring": recurring})
+        return JSONResponse(content={"success": True, "data": {"recurring": recurring}, "error": None})
 
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(status_code=500, content={"success": False, "data": None, "error": str(e)})
 
 
 # --------------- Reminder CRUD ---------------
@@ -295,10 +298,10 @@ async def create_reminder(request: CreateReminderRequest):
         result = reminders_collection.insert_one(reminder)
         rid = str(result.inserted_id)
         print(f"[MongoDB] Created reminder {rid} for {request.merchant}")
-        return JSONResponse(content={"status": "created", "id": rid})
+        return JSONResponse(content={"success": True, "data": {"id": rid}, "error": None})
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(status_code=500, content={"success": False, "data": None, "error": str(e)})
 
 
 @app.get("/api/reminders")
@@ -306,7 +309,7 @@ async def get_reminders():
     """Return all reminders from MongoDB."""
     docs = list(reminders_collection.find())
     reminders = [serialize_doc(d) for d in docs]
-    return JSONResponse(content={"reminders": reminders})
+    return JSONResponse(content={"success": True, "data": {"reminders": reminders}, "error": None})
 
 
 @app.patch("/api/reminders/{reminder_id}")
@@ -315,17 +318,17 @@ async def toggle_reminder(reminder_id: str):
     try:
         doc = reminders_collection.find_one({"_id": ObjectId(reminder_id)})
         if not doc:
-            return JSONResponse(status_code=404, content={"error": "Reminder not found"})
+            return JSONResponse(status_code=404, content={"success": False, "data": None, "error": "Reminder not found"})
         new_enabled = not doc["enabled"]
         reminders_collection.update_one(
             {"_id": ObjectId(reminder_id)},
             {"$set": {"enabled": new_enabled}}
         )
         print(f"[MongoDB] Toggled reminder {reminder_id} → enabled={new_enabled}")
-        return JSONResponse(content={"status": "toggled", "enabled": new_enabled})
+        return JSONResponse(content={"success": True, "data": {"enabled": new_enabled}, "error": None})
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return JSONResponse(status_code=400, content={"success": False, "data": None, "error": str(e)})
 
 
 @app.delete("/api/reminders/{reminder_id}")
@@ -335,11 +338,11 @@ async def delete_reminder(reminder_id: str):
         result = reminders_collection.delete_one({"_id": ObjectId(reminder_id)})
         if result.deleted_count > 0:
             print(f"[MongoDB] Deleted reminder {reminder_id}")
-            return JSONResponse(content={"status": "deleted"})
-        return JSONResponse(status_code=404, content={"error": "Reminder not found"})
+            return JSONResponse(content={"success": True, "data": None, "error": None})
+        return JSONResponse(status_code=404, content={"success": False, "data": None, "error": "Reminder not found"})
     except Exception as e:
         traceback.print_exc()
-        return JSONResponse(status_code=400, content={"error": str(e)})
+        return JSONResponse(status_code=400, content={"success": False, "data": None, "error": str(e)})
 
 
 # --------------- Due Reminders Check ---------------

@@ -64,30 +64,30 @@ const UploadZone = () => {
       }
       if (!response.ok || !data || typeof data !== "object") {
         const msg =
-          (typeof data === "object" && data && "message" in data ? (data as { message?: string }).message : undefined) ||
+          (typeof data === "object" && data && "error" in data ? (data as { error?: string }).error : undefined) ||
           (raw && raw.length > 0 ? raw.slice(0, 200) : "Empty response from server") ||
           `HTTP ${response.status}`;
         throw new Error(msg);
       }
-      const payload = data as { status?: string; ocr_confidence?: number; transactions?: unknown[]; message?: string };
+      const payload = data as { success?: boolean; data?: { ocr_confidence?: number; transactions?: unknown[] }; error?: string };
       console.log("[UploadZone] OCR Response:", payload);
 
-      if (payload.status === "success") {
+      if (payload.success && payload.data) {
         setProgress(100);
         setState("complete");
 
         // Update OCR confidence
-        setOcrConfidence(payload.ocr_confidence as number);
+        setOcrConfidence(payload.data.ocr_confidence as number);
 
         // Fetch full transaction history from DB (merges new + old)
         await fetchTransactions();
 
         // Auto-detect recurring payments from extracted transactions
-        if (Array.isArray(payload.transactions) && payload.transactions.length > 1) {
-          detectRecurring(payload.transactions as { merchant: string; amount: string; date: string }[]);
+        if (Array.isArray(payload.data.transactions) && payload.data.transactions.length > 1) {
+          detectRecurring(payload.data.transactions as { merchant: string; amount: string; date: string }[]);
         }
       } else {
-        const msg = payload.message || "Analysis failed";
+        const msg = payload.error || "Analysis failed";
         throw new Error(msg);
       }
     } catch (err) {

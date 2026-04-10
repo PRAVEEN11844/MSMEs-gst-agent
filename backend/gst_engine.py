@@ -128,37 +128,33 @@ def extract_gst_invoice(image_base64: str, mime_type: str = "image/jpeg") -> dic
         print(f"[OCR] Warning: PIL preprocessing failed, falling back to original: {e}")
         processed_base64 = image_base64
         
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=[
-                    {
-                        "role": "user",
-                        "parts": [
-                            {"text": GST_EXTRACTION_PROMPT},
-                            {
-                                "inline_data": {
-                                    "mime_type": mime_type,
-                                    "data": processed_base64,
-                                }
-                            },
-                        ],
-                    }
-                ],
-            )
+    try:
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": GST_EXTRACTION_PROMPT},
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": processed_base64,
+                            }
+                        },
+                    ],
+                }
+            ],
+        )
+        
+        raw_text = response.text.strip()
+        if raw_text.startswith("```"):
+            raw_text = raw_text.split("\n", 1)[1]
+            raw_text = raw_text.rsplit("```", 1)[0]
+            raw_text = raw_text.strip()
             
-            raw_text = response.text.strip()
-            if raw_text.startswith("```"):
-                raw_text = raw_text.split("\n", 1)[1]
-                raw_text = raw_text.rsplit("```", 1)[0]
-                raw_text = raw_text.strip()
-                
-            return json.loads(raw_text)
-            
-        except Exception as e:
-            print(f"[OCR] Gemini API failed: {e}. Executing OCR fallback.")
-            return _fallback_ocr_extraction(base64.b64decode(image_base64))
-            
+        return json.loads(raw_text)
+        
     except Exception as e:
-        print(f"[OCR] Critical error in engine: {e}")
+        print(f"[OCR] Gemini API failed: {e}. Executing OCR fallback.")
         return _fallback_ocr_extraction(base64.b64decode(image_base64))
