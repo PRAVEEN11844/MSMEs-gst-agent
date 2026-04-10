@@ -44,22 +44,28 @@ const GSTUpload = () => {
 
             clearInterval(progressInterval);
 
-            const data = await response.json();
+            const textResponse = await response.text();
+            let data;
+            try {
+                data = JSON.parse(textResponse);
+            } catch (parseErr) {
+                throw new Error(`Server connection failed (500)`);
+            }
 
-            if (!response.ok || data.status !== "success") {
-                throw new Error(data.message || data.error || "Analysis failed");
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || "Analysis failed");
             }
 
             setProgress(100);
             setState("complete");
-            setOcrConfidence(data.invoice.ocr_confidence);
+            setOcrConfidence(data.data.ocr_confidence);
 
-            if (data.invoice.tax_inferred) {
+            if (data.data.tax_inferred) {
                 toast({
                     title: "Tax Inferred",
                     description: "Tax totals weren't explicit so they were mathematically inferred from the total.",
                 });
-            } else if (data.invoice.tax_warning) {
+            } else if (data.data.tax_warning) {
                 toast({
                     title: "GST Computation Warning",
                     description: "The sum of taxes and taxable value doesn't exactly match the total amount. Please verify.",

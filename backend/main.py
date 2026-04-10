@@ -105,7 +105,7 @@ async def analyze_document(file: UploadFile = File(...)):
         b64_data = base64.b64encode(contents).decode("utf-8")
 
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents=[
                 {
                     "role": "user",
@@ -621,7 +621,7 @@ async def ask_question(request: AskRequest):
         print(f"[RAG] Calling Gemini with {len(relevant)} grounded transactions...")
 
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model="gemini-2.5-flash",
             contents=[{"role": "user", "parts": [{"text": full_prompt}]}],
         )
 

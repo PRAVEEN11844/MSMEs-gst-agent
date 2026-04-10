@@ -71,10 +71,13 @@ export function setGSTError(error: string) {
 export async function fetchGSTInvoices() {
     try {
         const res = await fetch("/api/gst/invoices");
-        const data = await res.json();
-        if (data.invoices) {
-            state = { ...state, invoices: data.invoices };
+        const json = await res.json();
+        
+        if (json.success && json.data) {
+            state = { ...state, invoices: json.data };
             emitChange();
+        } else if (!json.success && json.error) {
+            console.error("[GSTStore] Server error fetching invoices:", json.error);
         }
     } catch (err) {
         console.error("[GSTStore] Failed to fetch invoices:", err);
@@ -84,10 +87,12 @@ export async function fetchGSTInvoices() {
 export async function fetchGSTSummary() {
     try {
         const res = await fetch("/api/gst/summary/monthly");
-        const data = await res.json();
-        if (data && typeof data.total_revenue === 'number') {
-            state = { ...state, summary: data as GSTSummary };
+        const json = await res.json();
+        if (json.success && json.data && typeof json.data.total_revenue === 'number') {
+            state = { ...state, summary: json.data as GSTSummary };
             emitChange();
+        } else if (!json.success && json.error) {
+            console.error("[GSTStore] Server error fetching summary:", json.error);
         }
     } catch (err) {
         console.error("[GSTStore] Failed to fetch summary:", err);

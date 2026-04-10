@@ -119,51 +119,65 @@ async def analyze_gst_invoice(file: UploadFile = File(...)):
         extracted_data["created_at"] = datetime.now().isoformat()
         
         if not extracted_data.get("invoice_number"):
-            return JSONResponse(status_code=400, content={"error": "validation_error", "message": "Missing invoice number"})
+            return JSONResponse(status_code=400, content={"success": False, "data": None, "error": "validation_error: Missing invoice number"})
             
         if gst_invoices_collection is not None:
             try:
                 gst_invoices_collection.insert_one(dict(extracted_data))
             except DuplicateKeyError:
-                return JSONResponse(status_code=409, content={"error": "duplicate_error", "message": "Invoice already exists"})
+                return JSONResponse(status_code=409, content={"success": False, "data": None, "error": "duplicate_error: Invoice already exists"})
                 
         # Clean _id for JSON response
         if "_id" in extracted_data:
             extracted_data["_id"] = str(extracted_data["_id"])
             
-        return JSONResponse(content={"status": "success", "invoice": extracted_data})
+        return JSONResponse(content={"success": True, "data": extracted_data, "error": None})
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return JSONResponse(status_code=500, content={"success": False, "data": None, "error": str(e)})
 
 @router.get("/invoices")
 async def get_gst_invoices():
-    if gst_invoices_collection is None:
-        return JSONResponse(content={"invoices": []})
-    invoices = list(gst_invoices_collection.find({}, {"_id": 0}))
-    return JSONResponse(content={"invoices": invoices})
+    try:
+        if gst_invoices_collection is None:
+            return JSONResponse(content={"success": True, "data": [], "error": "DB not available"})
+        invoices = list(gst_invoices_collection.find({}, {"_id": 0}))
+        return JSONResponse(content={"success": True, "data": invoices, "error": None})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"success": False, "data": None, "error": str(e)})
 
 @router.get("/invoice/{invoice_number}")
 async def get_single_invoice(invoice_number: str):
-    if gst_invoices_collection is None:
-        raise HTTPException(status_code=404, detail="DB not available")
-    invoice = gst_invoices_collection.find_one({"invoice_number": invoice_number}, {"_id": 0})
-    if not invoice:
-        raise HTTPException(status_code=404, detail="Invoice not found")
-    return JSONResponse(content=invoice)
+    try:
+        if gst_invoices_collection is None:
+            return JSONResponse(status_code=404, content={"success": False, "data": None, "error": "DB not available"})
+        invoice = gst_invoices_collection.find_one({"invoice_number": invoice_number}, {"_id": 0})
+        if not invoice:
+            return JSONResponse(status_code=404, content={"success": False, "data": None, "error": "Invoice not found"})
+        return JSONResponse(content={"success": True, "data": invoice, "error": None})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"success": False, "data": None, "error": str(e)})
 
 @router.get("/summary/monthly")
 async def get_gst_summary():
     try:
         summary = get_monthly_gst_summary()
-        return JSONResponse(content=summary)
+        return JSONResponse(content={"success": True, "data": summary, "error": None})
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"success": False, "data": None, "error": str(e)})
 
 @router.get("/export")
 async def export_gstr1():
     try:
         return export_gstr1_csv()
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"success": False, "data": None, "error": str(e)})

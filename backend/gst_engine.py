@@ -2,7 +2,10 @@ import os
 import json
 import io
 import base64
+import re
+from datetime import datetime
 from PIL import Image
+import pytesseract
 from google import genai
 from dotenv import load_dotenv
 
@@ -37,6 +40,68 @@ Rules:
 - Always return strict JSON. No explanations. No markdown.
 """
 
+def _fallback_ocr_extraction(image_bytes: bytes) -> dict:
+    try:
+        image = Image.open(io.BytesIO(image_bytes))
+        text = pytesseract.image_to_string(image)
+        
+        # Basic Regex rules for finding components
+        gstin_match = re.search(r"([0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[A-Z0-9]{1}Z[A-Z0-9]{1})", text, re.IGNORECASE)
+        gstin = gstin_match.group(1).upper() if gstin_match else None
+        
+        date_match = re.search(r"([0-3][0-9][-/][0-1][0-9][-/][1-2][0-9]{3})", text)
+        invoice_date = date_match.group(1) if date_match else None
+        
+        inv_match = re.search(r"(?:INV|INVOICE)(?:[^\dA-Z]*)([A-Z0-9-]+)", text, re.IGNORECASE)
+        invoice_number = inv_match.group(1) if inv_match else f"FB-{int(datetime.now().timestamp())}"
+        
+        amount = 0.0
+        lines = text.split("\n")
+        amounts_found = []
+        for line in lines:
+            if "total" in line.lower() or "amount" in line.lower():
+                num_matches = re.findall(r"[\d]+[.,][\d]{2}", line)
+                for num in num_matches:
+                    try:
+                        amt_val = float(num.replace(",", ""))
+                        amounts_found.append(amt_val)
+                    except ValueError:
+                        pass
+        
+        total_amount = max(amounts_found) if amounts_found else 0.0
+        
+        return {
+            "gstin": gstin,
+            "invoice_number": invoice_number,
+            "invoice_date": invoice_date,
+            "taxable_value": 0.0,
+            "cgst": 0.0,
+            "sgst": 0.0,
+            "igst": 0.0,
+            "total_amount": total_amount,
+            "ocr_confidence": 0.5,
+            "tax_rates_found": [],
+            "tax_breakdown_explicit": False,
+            "is_fallback": True
+        }
+    except Exception as e:
+        print(f"[OCR] Fallback OCR failed: {e}")
+        return {
+            "gstin": None,
+            "invoice_number": f"ERR-{int(datetime.now().timestamp())}",
+            "invoice_date": None,
+            "taxable_value": 0.0,
+            "cgst": 0.0,
+            "sgst": 0.0,
+            "igst": 0.0,
+            "total_amount": 0.0,
+            "ocr_confidence": 0.0,
+            "tax_rates_found": [],
+            "tax_breakdown_explicit": False,
+            "is_fallback": True,
+            "error_fallback": str(e)
+        }
+
 def extract_gst_invoice(image_base64: str, mime_type: str = "image/jpeg") -> dict:
     if not client:
         raise ValueError("Gemini API key is not configured.")
@@ -63,28 +128,37 @@ def extract_gst_invoice(image_base64: str, mime_type: str = "image/jpeg") -> dic
         print(f"[OCR] Warning: PIL preprocessing failed, falling back to original: {e}")
         processed_base64 = image_base64
         
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=[
-            {
-                "role": "user",
-                "parts": [
-                    {"text": GST_EXTRACTION_PROMPT},
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[
                     {
-                        "inline_data": {
-                            "mime_type": mime_type,
-                            "data": processed_base64,
-                        }
-                    },
+                        "role": "user",
+                        "parts": [
+                            {"text": GST_EXTRACTION_PROMPT},
+                            {
+                                "inline_data": {
+                                    "mime_type": mime_type,
+                                    "data": processed_base64,
+                                }
+                            },
+                        ],
+                    }
                 ],
-            }
-        ],
-    )
-    
-    raw_text = response.text.strip()
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("\n", 1)[1]
-        raw_text = raw_text.rsplit("```", 1)[0]
-        raw_text = raw_text.strip()
-        
-    return json.loads(raw_text)
+            )
+            
+            raw_text = response.text.strip()
+            if raw_text.startswith("```"):
+                raw_text = raw_text.split("\n", 1)[1]
+                raw_text = raw_text.rsplit("```", 1)[0]
+                raw_text = raw_text.strip()
+                
+            return json.loads(raw_text)
+            
+        except Exception as e:
+            print(f"[OCR] Gemini API failed: {e}. Executing OCR fallback.")
+            return _fallback_ocr_extraction(base64.b64decode(image_base64))
+            
+    except Exception as e:
+        print(f"[OCR] Critical error in engine: {e}")
+        return _fallback_ocr_extraction(base64.b64decode(image_base64))
