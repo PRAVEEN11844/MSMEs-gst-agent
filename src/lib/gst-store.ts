@@ -15,6 +15,8 @@ export interface GSTInvoice {
     tax_inferred?: boolean;
     tax_breakdown_explicit?: boolean;
     tax_rates_found?: number[];
+    fallback_used?: boolean;   // set by gst_routes.py when Gemini is unavailable
+    is_fallback?: boolean;     // set directly by the OCR engine
     created_at?: string;
 }
 

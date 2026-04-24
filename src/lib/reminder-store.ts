@@ -63,7 +63,9 @@ export async function detectRecurring(transactions: { merchant: string; amount: 
             body: JSON.stringify({ transactions }),
         });
         const data = await res.json();
-        state = { ...state, recurringPayments: data.recurring || [], isDetecting: false };
+        // Backend returns: { success, data: { recurring: [...] }, error }
+        const recurring = data?.data?.recurring ?? data?.recurring ?? [];
+        state = { ...state, recurringPayments: recurring, isDetecting: false };
         emitChange();
     } catch (err) {
         console.error("[ReminderStore] detectRecurring error:", err);
@@ -78,7 +80,9 @@ export async function fetchReminders() {
     try {
         const res = await fetch("/api/reminders");
         const data = await res.json();
-        state = { ...state, reminders: data.reminders || [], isLoadingReminders: false };
+        // Backend returns: { success, data: { reminders: [...] }, error }
+        const reminders = data?.data?.reminders ?? data?.reminders ?? [];
+        state = { ...state, reminders, isLoadingReminders: false };
         emitChange();
     } catch (err) {
         console.error("[ReminderStore] fetchReminders error:", err);

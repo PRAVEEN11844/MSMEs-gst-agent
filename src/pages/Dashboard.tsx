@@ -85,7 +85,7 @@ const Dashboard = () => {
           ) : (
             recurringPayments.map((item, i) => (
               <SuggestionCard
-                key={item.merchant}
+                key={`recurring-${item.merchant}-${i}`}
                 merchant={item.merchant}
                 amount={item.average_amount}
                 frequency={item.frequency_days}
