@@ -4,7 +4,15 @@ import os
 import certifi
 from dotenv import load_dotenv
 
-load_dotenv()
+import pathlib as _pathlib
+load_dotenv(next(
+    (p for p in [
+        _pathlib.Path(__file__).parent / ".env",
+        _pathlib.Path(__file__).parent.parent / ".env",
+    ] if p.exists()),
+    None
+))
+
 
 MONGO_URI = os.getenv("MONGO_URI")
 DB_NAME = os.getenv("DB_NAME", "ragmodel1")
@@ -26,8 +34,9 @@ except Exception as e:
 db = None
 transactions_collection = None
 reminders_collection = None
+gst_invoices_collection = None
 
-if client:
+if client is not None:
     # Test connection
     try:
         client.admin.command("ping")

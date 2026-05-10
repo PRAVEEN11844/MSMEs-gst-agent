@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -7,15 +7,32 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 from collections import defaultdict
 from bson import ObjectId
-from database import transactions_collection, reminders_collection
+from database import transactions_collection, reminders_collection, gst_invoices_collection
 import json
 import base64
 import traceback
 import re
 import os
+import io as _io
+import pytesseract
+from PIL import Image as PILImage
 from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type, retry_if_exception, RetryError
+from google.genai.errors import APIError, ClientError
 
-load_dotenv()
+import pathlib as _pathlib
+
+# Load .env from backend/ dir first, then fall back to project root
+_here      = _pathlib.Path(__file__).parent
+_root      = _here.parent
+_found_env = next(
+    (p for p in [_here / ".env", _root / ".env"] if p.exists()), None
+)
+if _found_env:
+    load_dotenv(_found_env)
+else:
+    load_dotenv()  # last-resort: let python-dotenv search upward
+
 
 app = FastAPI()
 
@@ -30,8 +47,74 @@ app.add_middleware(
 from gst_routes import router as gst_router
 app.include_router(gst_router, prefix="/api/gst", tags=["gst"])
 
+# --------------- Telegram Bot Setup ---------------
+
+try:
+    from telegram import Update
+    from telegram_bot import create_bot_app
+    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    # Skip obvious placeholders so the server never crashes on startup
+    _token_looks_real = bool(BOT_TOKEN) and ":" in BOT_TOKEN and BOT_TOKEN != "PASTE_YOUR_NEW_TOKEN_HERE"
+    telegram_app = create_bot_app() if _token_looks_real else None
+    if not _token_looks_real:
+        print("[Telegram] Bot disabled — set a real TELEGRAM_BOT_TOKEN in .env")
+except ImportError:
+    print("[Telegram] python-telegram-bot not installed — bot disabled")
+    telegram_app = None
+
+@app.on_event("startup")
+async def startup():
+    if telegram_app:
+        try:
+            await telegram_app.initialize()
+            await telegram_app.start()        # ✅ THIS WAS MISSING
+            print("[Telegram] Bot initialized OK")
+        except Exception as e:
+            print(f"[Telegram] WARNING: Bot init failed: {e}")
+
+@app.on_event("shutdown")
+async def shutdown():
+    if telegram_app:
+        try:
+            await telegram_app.stop()         # ✅ THIS WAS MISSING
+            await telegram_app.shutdown()
+        except Exception:
+            pass
+        print("[Telegram] Bot shut down")
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(request: Request):
+    if not telegram_app:
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Bot not configured"}
+        )
+    try:
+        data = await request.json()
+        print(f"[Telegram] Webhook received: {json.dumps(data)[:200]}")  # ✅ ADD THIS
+        update = Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return JSONResponse(content={"ok": True})
+    except Exception as e:
+        traceback.print_exc()
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "data": None, "error": str(exc)}
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "data": None, "error": exc.detail}
+    )
+
 API_KEY = os.getenv("GEMINI_API_KEY", "")
-client = genai.Client(api_key=API_KEY)
+client = genai.Client(api_key=API_KEY) if API_KEY else None
 
 # --------------- Helpers ---------------
 
@@ -65,7 +148,58 @@ class CreateReminderRequest(BaseModel):
     next_due_date: str
 
 
-# --------------- OCR Endpoint (existing) ---------------
+# --------------- OCR Fallback Helper ---------------
+
+def _ocr_fallback_transactions(image_bytes: bytes) -> dict:
+    """Pure Tesseract fallback when Gemini is unavailable. Always returns valid dict."""
+    try:
+        try:
+            pytesseract.get_tesseract_version()
+        except pytesseract.TesseractNotFoundError:
+            common_path = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            if os.path.exists(common_path):
+                pytesseract.pytesseract.tesseract_cmd = common_path
+            else:
+                raise RuntimeError("Tesseract not found")
+
+        image = PILImage.open(_io.BytesIO(image_bytes))
+        raw_text = pytesseract.image_to_string(image)
+        transactions = []
+        today = datetime.now().strftime("%b %d, %Y")
+
+        for line in raw_text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            amount_match = re.search(r"[\u20b9Rs\.]*\s*([\d,]+\.?\d{0,2})", line)
+            if amount_match:
+                try:
+                    amount_val = float(amount_match.group(1).replace(",", ""))
+                    if amount_val < 1:
+                        continue
+                    merchant = re.sub(r"[\u20b9Rs\.\d,\s]+", "", line).strip() or "Unknown"
+                    transactions.append({
+                        "merchant": merchant[:40],
+                        "category": "Other",
+                        "amount": f"\u20b9{amount_val:,.2f}",
+                        "date": today,
+                        "status": "pending",
+                    })
+                except ValueError:
+                    continue
+
+        for i, tx in enumerate(transactions):
+            tx["id"] = i + 1
+
+        print(f"[OCR Fallback] Extracted {len(transactions)} transactions from raw text")
+        return {"ocr_confidence": 0.4, "transactions": transactions, "fallback_used": True}
+
+    except Exception as e:
+        print(f"[OCR Fallback] Failed completely: {e}")
+        return {"ocr_confidence": 0.0, "transactions": [], "fallback_used": True, "error": str(e)}
+
+
+# --------------- OCR Endpoint ---------------
 
 EXTRACTION_PROMPT = """Analyze this financial document image (receipt, bill, bank statement, etc.) and extract all transactions.
 
@@ -95,40 +229,94 @@ Return ONLY valid JSON in this exact format, no markdown, no code fences:
 
 @app.post("/api/analyze")
 async def analyze_document(file: UploadFile = File(...)):
+    raw_text = ""
     try:
         contents = await file.read()
         mime_type = file.content_type or "image/png"
 
         print(f"[Backend] Received file: {file.filename} ({mime_type}, {len(contents)} bytes)")
 
-        # Use Gemini to extract transactions from the image
+        # Guard: reject if Gemini client is unavailable
+        if not client:
+            print("[/api/analyze] No Gemini client — using OCR fallback")
+            fallback_data = _ocr_fallback_transactions(contents)
+            return JSONResponse(status_code=200, content={
+                "success": True, "data": fallback_data,
+                "error": "Gemini API key not configured", "fallback_used": True,
+            })
+
+        # Guard: reject empty files immediately
+        if not contents:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "data": None, "error": "Empty file received. Please upload a valid image."},
+            )
+
+        # Validate it's a readable image via PIL
+        try:
+            from PIL import Image as _PIL_Image
+            import io as _io
+            _PIL_Image.open(_io.BytesIO(contents)).verify()
+        except Exception as img_err:
+            print(f"[ERROR] Invalid image file: {img_err}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "data": None, "error": "Invalid image file. Please upload a PNG or JPG."},
+            )
+
         b64_data = base64.b64encode(contents).decode("utf-8")
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[
-                {
-                    "role": "user",
-                    "parts": [
-                        {"text": EXTRACTION_PROMPT},
-                        {
-                            "inline_data": {
-                                "mime_type": mime_type,
-                                "data": b64_data,
+        # Model cascade: try newer model first, fall back on quota errors
+        _ANALYZE_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash"]
+        response = None
+        for _model in _ANALYZE_MODELS:
+            try:
+                @retry(
+                    stop=stop_after_attempt(2),
+                    wait=wait_fixed(1),
+                    retry=retry_if_exception(lambda e: not isinstance(e, (ClientError, APIError)))
+                )
+                def generate_with_retry(m=_model):
+                    return client.models.generate_content(
+                        model=m,
+                        contents=[
+                            {
+                                "role": "user",
+                                "parts": [
+                                    {"text": EXTRACTION_PROMPT},
+                                    {
+                                        "inline_data": {
+                                            "mime_type": mime_type,
+                                            "data": b64_data,
+                                        }
+                                    },
+                                ],
                             }
-                        },
-                    ],
-                }
-            ],
-        )
+                        ],
+                    )
+                response = generate_with_retry()
+                print(f"[Backend] Used model: {_model}")
+                break
+            except (ClientError, APIError) as _e:
+                _msg = str(_e)
+                if "429" in _msg or "RESOURCE_EXHAUSTED" in _msg:
+                    print(f"[Backend] {_model} quota exceeded — trying next")
+                    continue
+                raise   # non-quota error: re-raise to outer handler
+            except Exception:
+                raise
+
+        if response is None:
+            raise ClientError(429, {}, None)   # all models exhausted
+
 
         raw_text = response.text.strip()
         print(f"[Backend] Gemini raw response: {raw_text[:500]}")
 
-        # Clean up response — remove markdown fences if present
+        # Strip markdown fences if present
         if raw_text.startswith("```"):
-            raw_text = raw_text.split("\n", 1)[1]  # Remove first line
-            raw_text = raw_text.rsplit("```", 1)[0]  # Remove last fence
+            raw_text = raw_text.split("\n", 1)[1]
+            raw_text = raw_text.rsplit("```", 1)[0]
             raw_text = raw_text.strip()
 
         data = json.loads(raw_text)
@@ -165,17 +353,53 @@ async def analyze_document(file: UploadFile = File(...)):
         })
 
     except json.JSONDecodeError as e:
-        print(f"[Backend] JSON parse error: {e}")
-        print(f"[Backend] Raw text was: {raw_text}")
+        print(f"[ERROR] JSON parse error: {e} | Raw text: {raw_text[:300]}")
         return JSONResponse(
-            status_code=500,
-            content={"success": False, "data": None, "error": "Failed to parse AI response. Please try again."},
+            status_code=422,
+            content={"success": False, "data": None, "error": "AI returned an unreadable response. Please try again."},
+        )
+    except (ClientError, APIError) as e:
+        msg = str(e)
+        if '429' in msg or 'RESOURCE_EXHAUSTED' in msg:
+            print(f"[/api/analyze] Gemini quota exceeded — switching to OCR fallback")
+        elif '403' in msg:
+            print(f"[/api/analyze] Gemini auth failed — switching to OCR fallback")
+        else:
+            print(f"[/api/analyze] Gemini ClientError — switching to OCR fallback: {msg[:150]}")
+
+        fallback_data = _ocr_fallback_transactions(contents)
+        try:
+            new_count = 0
+            for tx in fallback_data.get("transactions", []):
+                if transactions_collection is not None:
+                    existing = transactions_collection.find_one(
+                        {"merchant": tx["merchant"], "amount": tx["amount"], "date": tx["date"]}
+                    )
+                    if not existing:
+                        transactions_collection.insert_one(dict(tx))
+                        new_count += 1
+            print(f"[MongoDB] OCR fallback stored {new_count} transactions")
+        except Exception as db_err:
+            print(f"[MongoDB] OCR fallback DB store skipped: {db_err}")
+
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "data": fallback_data, "error": None, "fallback_used": True},
+        )
+    except RetryError as e:
+        inner = str(e.last_attempt.exception()) if hasattr(e, 'last_attempt') else str(e)
+        print(f"[ERROR] RetryError after all attempts — switching to OCR fallback: {inner[:200]}")
+        fallback_data = _ocr_fallback_transactions(contents)
+        return JSONResponse(
+            status_code=200,
+            content={"success": True, "data": fallback_data, "error": None, "fallback_used": True},
         )
     except Exception as e:
+        print(f"[ERROR] Unexpected error in /api/analyze: {str(e)}")
         traceback.print_exc()
         return JSONResponse(
             status_code=500,
-            content={"success": False, "data": None, "error": str(e)},
+            content={"success": False, "data": None, "error": f"Internal server error: {str(e)}", "fallback_used": False},
         )
 
 
@@ -359,7 +583,7 @@ async def check_due_reminders():
                 due.append(serialize_doc(doc))
         except (ValueError, KeyError):
             continue
-    return JSONResponse(content={"due_reminders": due})
+    return JSONResponse(content={"success": True, "data": {"due_reminders": due}, "error": None})
 
 
 # --------------- RAG Chat ---------------
@@ -566,13 +790,22 @@ async def ask_question(request: AskRequest):
     question = request.question.strip()
     print(f"\n[RAG] Question: {question}")
 
-    # Load transactions from MongoDB
-    stored_transactions = list(transactions_collection.find({}, {"_id": 0})) if transactions_collection is not None else []
+    # Load transactions from MongoDB (individually try/except'd — DB hiccup won't crash the whole request)
+    stored_transactions = []
+    if transactions_collection is not None:
+        try:
+            stored_transactions = list(transactions_collection.find({}, {"_id": 0}))
+        except Exception as e:
+            print(f"[RAG] Failed to load transactions: {e}")
     print(f"[RAG] Stored transactions (from DB): {len(stored_transactions)}")
-    
-    # Load GST invoices for context
-    from database import gst_invoices_collection
-    stored_gst_invoices = list(gst_invoices_collection.find({}, {"_id": 0})) if gst_invoices_collection is not None else []
+
+    # Load GST invoices for context (top-level import — no per-request import risk)
+    stored_gst_invoices = []
+    if gst_invoices_collection is not None:
+        try:
+            stored_gst_invoices = list(gst_invoices_collection.find({}, {"_id": 0}))
+        except Exception as e:
+            print(f"[RAG] Failed to load GST invoices: {e}")
 
     # If no data uploaded at all
     if not stored_transactions and not stored_gst_invoices:
@@ -617,25 +850,81 @@ async def ask_question(request: AskRequest):
 
     # Step 4: Use LLM with strict grounding prompt
     try:
-        # Format transactions for the prompt
-        tx_text = json.dumps(relevant, indent=2, ensure_ascii=False)
+        tx_text    = json.dumps(relevant, indent=2, ensure_ascii=False)
         full_prompt = RAG_SYSTEM_PROMPT.format(transactions=tx_text, question=question)
 
         print(f"[RAG] Calling Gemini with {len(relevant)} grounded transactions...")
 
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[{"role": "user", "parts": [{"text": full_prompt}]}],
-        )
+        _RAG_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash"]
+        response = None
+        for _model in _RAG_MODELS:
+            try:
+                @retry(
+                    stop=stop_after_attempt(2),
+                    wait=wait_fixed(1),
+                    retry=retry_if_exception(lambda e: not isinstance(e, (ClientError, APIError)))
+                )
+                def ask_with_retry(m=_model):
+                    return client.models.generate_content(
+                        model=m,
+                        contents=[{"role": "user", "parts": [{"text": full_prompt}]}],
+                    )
+                response = ask_with_retry()
+                print(f"[RAG] Used model: {_model}")
+                break
+            except (ClientError, APIError) as _e:
+                _msg = str(_e)
+                if "429" in _msg or "RESOURCE_EXHAUSTED" in _msg:
+                    print(f"[RAG] {_model} quota exceeded — trying next")
+                    continue
+                raise
+            except Exception:
+                raise
+
+        if response is None:
+            return JSONResponse(content={
+                "answer": "The AI service is currently rate-limited on all models. "
+                          "Your data is safe — please try again in a few minutes."
+            })
 
         answer = response.text.strip()
         print(f"[RAG] LLM answer ({len(answer)} chars): {answer[:200]}")
-
         return JSONResponse(content={"answer": answer})
 
+    except ClientError as e:
+        msg = str(e)
+        if '429' in msg or 'RESOURCE_EXHAUSTED' in msg:
+            answer = "The AI service is currently rate-limited. Please wait a moment and try again."
+        else:
+            answer = f"Gemini API error: {msg[:150]}"
+        print(f"[ERROR] Gemini ClientError in /api/ask: {msg[:200]}")
+        return JSONResponse(content={"answer": answer})
+    except RetryError as e:
+        print(f"[ERROR] RetryError in /api/ask after all attempts")
+        return JSONResponse(content={"answer": "Unable to process your request currently. Please try again in a moment."})
     except Exception as e:
+        print(f"[ERROR] Unexpected error in /api/ask: {str(e)}")
         traceback.print_exc()
         return JSONResponse(
             status_code=500,
             content={"answer": f"Failed to process your question: {str(e)}"}
         )
+
+
+# --------------- Health Check ---------------
+
+@app.get("/api/health")
+async def health():
+    """Health check endpoint — reports DB and Gemini availability."""
+    db_ok = False
+    try:
+        if transactions_collection is not None:
+            transactions_collection.find_one()
+            db_ok = True
+    except Exception:
+        pass
+    return JSONResponse(content={
+        "status": "ok",
+        "db": db_ok,
+        "gemini": bool(API_KEY),
+    })

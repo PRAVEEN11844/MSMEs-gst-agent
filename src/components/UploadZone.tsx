@@ -69,27 +69,41 @@ const UploadZone = () => {
           `HTTP ${response.status}`;
         throw new Error(msg);
       }
-      const payload = data as { success?: boolean; data?: { ocr_confidence?: number; transactions?: unknown[] }; error?: string };
+      const payload = data as {
+        success?: boolean;
+        data?: { ocr_confidence?: number; transactions?: unknown[]; fallback_used?: boolean };
+        error?: string;
+        fallback_used?: boolean;
+      };
       console.log("[UploadZone] OCR Response:", payload);
 
-      if (payload.success && payload.data) {
-        setProgress(100);
-        setState("complete");
+      // Treat fallback_used as soft success — backend used OCR instead of Gemini
+      const isFallback = payload.fallback_used || payload.data?.fallback_used;
+      const hasData = payload.success || isFallback;
 
-        // Update OCR confidence
-        setOcrConfidence(payload.data.ocr_confidence as number);
-
-        // Fetch full transaction history from DB (merges new + old)
-        await fetchTransactions();
-
-        // Auto-detect recurring payments from extracted transactions
-        if (Array.isArray(payload.data.transactions) && payload.data.transactions.length > 1) {
-          detectRecurring(payload.data.transactions as { merchant: string; amount: string; date: string }[]);
-        }
-      } else {
-        const msg = payload.error || "Analysis failed";
-        throw new Error(msg);
+      if (!hasData || !payload.data) {
+        throw new Error(payload.error ?? `Server error (${response.status})`);
       }
+
+      setProgress(100);
+      setState("complete");
+      setOcrConfidence((payload.data.ocr_confidence as number) ?? null);
+
+      if (isFallback) {
+        toast({
+          title: "⚠️ OCR Fallback Used",
+          description: "Gemini AI was unavailable. Data extracted via OCR only — values marked 'pending', please verify.",
+        });
+      }
+
+      // Fetch full transaction history from DB (merges new + old)
+      await fetchTransactions();
+
+      // Auto-detect recurring payments from extracted transactions
+      if (Array.isArray(payload.data.transactions) && payload.data.transactions.length > 1) {
+        detectRecurring(payload.data.transactions as { merchant: string; amount: string; date: string }[]);
+      }
+
     } catch (err) {
       clearInterval(progressInterval);
       const message = err instanceof Error ? err.message : "Failed to analyze document.";

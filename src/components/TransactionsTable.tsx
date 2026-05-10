@@ -15,6 +15,20 @@ const TransactionsTable = ({ transactions, onUpdateTransaction }: TransactionsTa
   const [editingCell, setEditingCell] = useState<{ row: number; field: string } | null>(null);
   const [editValue, setEditValue] = useState("");
 
+  const handleExport = () => {
+    const csv = [
+      ["Merchant", "Category", "Amount", "Date", "Status"],
+      ...data.map(tx => [tx.merchant, tx.category, tx.amount, tx.date, tx.status]),
+    ].map(row => row.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "transactions.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const startEdit = (rowIndex: number, field: string, currentValue: string) => {
     if (!onUpdateTransaction) return; // Only allow editing if handler provided
     setEditingCell({ row: rowIndex, field });
@@ -73,7 +87,7 @@ const TransactionsTable = ({ transactions, onUpdateTransaction }: TransactionsTa
       <div className="flex items-center justify-between px-5 py-4 border-b border-border">
         <h3 className="font-semibold text-foreground">Extracted Transactions</h3>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" className="text-xs gap-1.5">
+          <Button variant="outline" size="sm" className="text-xs gap-1.5" onClick={handleExport}>
             <Download className="w-3.5 h-3.5" /> Export
           </Button>
           <Button size="sm" className="text-xs gap-1.5 gradient-primary text-primary-foreground">
@@ -97,7 +111,7 @@ const TransactionsTable = ({ transactions, onUpdateTransaction }: TransactionsTa
           <tbody>
             {data.map((tx, i) => (
               <motion.tr
-                key={tx.id}
+                key={`${tx.id ?? 'tx'}-${i}`}
                 initial={{ opacity: 0, x: -10 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: i * 0.05 }}

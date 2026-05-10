@@ -52,31 +52,67 @@ const GSTUpload = () => {
                 throw new Error(`Server connection failed (500)`);
             }
 
+            // 422 = image unreadable — show helpful guidance, not a generic crash
+            if (response.status === 422 && data && !data.success) {
+                const tip = data.tip ? ` ${data.tip}` : "";
+                const msg = `${data.error ?? "Extraction failed."}${tip}`;
+                setState("error");
+                setErrorMessage(msg);
+                setGSTAnalyzing(false);
+                toast({
+                    title: "📷 Image Not Readable",
+                    description: msg,
+                    variant: "destructive",
+                });
+                return;
+            }
+
             if (!response.ok || !data.success) {
                 throw new Error(data.error || "Analysis failed");
             }
 
+
+            // Guard: data must be a non-null object with invoice fields
+            if (!data.data || typeof data.data !== "object") {
+                throw new Error("Server returned an empty response. Please try a clearer image.");
+            }
+
             setProgress(100);
             setState("complete");
-            setOcrConfidence(data.data.ocr_confidence);
+            setOcrConfidence(data.data.ocr_confidence ?? null);
 
-            if (data.data.tax_inferred) {
-                toast({
-                    title: "Tax Inferred",
-                    description: "Tax totals weren't explicit so they were mathematically inferred from the total.",
-                });
-            } else if (data.data.tax_warning) {
-                toast({
-                    title: "GST Computation Warning",
-                    description: "The sum of taxes and taxable value doesn't exactly match the total amount. Please verify.",
-                    variant: "destructive",
-                });
+            // Show appropriate toast based on extraction quality
+            if (data.data.fallback_used) {
+                const alreadyShown = sessionStorage.getItem("fallback_toast_shown");
+                if (!alreadyShown) {
+                    sessionStorage.setItem("fallback_toast_shown", "true");
+                    toast({
+                        title: "\u2139\ufe0f Running in OCR Mode",
+                        description: "Gemini AI quota reached. Switching to OCR extraction \u2014 data marked 'pending' for your review.",
+                    });
+                }
+            } else {
+                // Gemini worked — clear flag so next quota reset shows fresh toast
+                sessionStorage.removeItem("fallback_toast_shown");
+                if (data.data.tax_inferred) {
+                    toast({
+                        title: "Tax Inferred",
+                        description: "Tax totals weren't explicit so they were mathematically inferred from the total.",
+                    });
+                } else if (data.data.tax_warning) {
+                    toast({
+                        title: "\u26a0\ufe0f GST Mismatch",
+                        description: "Tax values don't add up to the total. Please verify.",
+                        variant: "destructive",
+                    });
+                }
             }
 
             // Refresh data
             await fetchGSTInvoices();
             await fetchGSTSummary();
             setGSTAnalyzing(false);
+
 
         } catch (err) {
             clearInterval(progressInterval);
@@ -173,7 +209,7 @@ const GSTUpload = () => {
                                         <p className="font-medium truncate">{fileName}</p>
                                         <p className="text-sm text-muted-foreground">
                                             {state === "uploading" && "Uploading to secure server..."}
-                                            {state === "processing" && "Extracting GST values with Gemini 2.5..."}
+                                            {state === "processing" && "Extracting GST values with Gemini 1.5..."}
                                             {state === "complete" && "Extraction complete!"}
                                         </p>
                                     </div>
@@ -186,11 +222,15 @@ const GSTUpload = () => {
                                     )}
                                 </div>
                                 <Progress value={progress} className="h-2" />
-                                {ocrConfidence && (
+                                {ocrConfidence !== null && ocrConfidence > 0 ? (
                                     <p className="text-sm mt-4 text-center text-muted-foreground">
-                                        Confidence: {(ocrConfidence * 100).toFixed(1)}%
+                                        AI Confidence: {(ocrConfidence * 100).toFixed(1)}%
                                     </p>
-                                )}
+                                ) : ocrConfidence === 0 ? (
+                                    <p className="text-sm mt-4 text-center text-amber-500">
+                                        ⚠️ OCR mode — please verify extracted values
+                                    </p>
+                                ) : null}
                                 {state === "complete" && (
                                     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-6 flex justify-center">
                                         <Button onClick={() => setState("idle")}>Upload Another</Button>

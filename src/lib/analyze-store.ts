@@ -78,9 +78,15 @@ export async function fetchTransactions() {
     try {
         const res = await fetch("/api/transactions");
         const data = await res.json();
-        if (data.transactions && data.transactions.length > 0) {
+        // Backend returns: { success, data: { transactions: [...] }, error }
+        if (!data.success && data.error) {
+            console.error("[AnalyzeStore] Server error fetching transactions:", data.error);
+            return;
+        }
+        const transactions = data?.data?.transactions ?? [];
+        if (transactions.length > 0) {
             // Assign IDs if not present
-            const txns = data.transactions.map((tx: Transaction, i: number) => ({
+            const txns = transactions.map((tx: Transaction, i: number) => ({
                 ...tx,
                 id: tx.id ?? i + 1,
                 status: tx.status ?? "verified",

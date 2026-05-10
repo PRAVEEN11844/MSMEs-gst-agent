@@ -71,7 +71,7 @@ const Reminders = () => {
         </h2>
         {insights.map((insight, i) => (
           <motion.div
-            key={i}
+            key={insight}
             initial={{ opacity: 0, x: -10 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ delay: 0.3 + i * 0.1 }}
